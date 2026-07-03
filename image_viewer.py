@@ -1640,16 +1640,20 @@ class _BarChart(QWidget):
         self.setStyleSheet(f"background:{_SURFACE};")
 
     def set_data(self, data: list, xlabel="", ylabel="",
-                 series_names=("A", "B"), series_colors=None):
-        """data: [(label, val0, val1), ...]
-        series_names: 凡例ラベル (デフォルト A/B)
-        series_colors: 系列の色リスト (Noneで _C[0], _C[1] を使用)
+                 series_names=("A", "B"), series_colors=None,
+                 bipolar_colors=None):
+        """data: [(label, val0, val1, ...), ...]
+        series_names: 凡例ラベル
+        series_colors: 系列の固定色リスト
+        bipolar_colors: 系列ごとに (pos_hex, neg_hex) または None のリスト。
+                        指定した系列は値の正負で塗り分ける。
         """
         self._data = data
         self._xlabel = xlabel
         self._ylabel = ylabel
         self._series_names = list(series_names)
         self._series_colors = list(series_colors) if series_colors else [_C[0], _C[1]]
+        self._bipolar_colors = list(bipolar_colors) if bipolar_colors else []
         self._hover_bar = None
         self.update()
 
@@ -1703,6 +1707,7 @@ class _BarChart(QWidget):
         colors_ab = getattr(self, '_series_colors', [_C[0], _C[1]])
         ser_names = getattr(self, '_series_names', ["A", "B"])
 
+        bipolar = getattr(self, '_bipolar_colors', [])
         for i, row in enumerate(self._data):
             lbl = row[0]
             vals = row[1:]
@@ -1713,7 +1718,12 @@ class _BarChart(QWidget):
                 by = min(cy(val), zero_y)
                 bh = max(abs(cy(val) - zero_y), 1)
                 is_hov = (self._hover_bar == (i, j))
-                col = colors_ab[j % len(colors_ab)]
+                # 正負で色を塗り分けるか固定色かを選択
+                if j < len(bipolar) and bipolar[j] is not None:
+                    pos_col, neg_col = bipolar[j]
+                    col = pos_col if val >= 0 else neg_col
+                else:
+                    col = colors_ab[j % len(colors_ab)]
                 c = QColor(col)
                 if is_hov:
                     c = c.lighter(130)
@@ -1762,16 +1772,28 @@ class _BarChart(QWidget):
             p.drawText(QRectF(-60, -10, 120, 20), Qt.AlignCenter, self._ylabel)
             p.restore()
         # 凡例: 右上に横並び
-        leg_item_w = 60
+        # 凡例: bipolarの系列は正負2色を小さい四角で並べて表示
+        leg_item_w = 72
         lx = W - mr - leg_item_w * n_ser - 4
         ly = mt + 4
-        for j, (sn, col) in enumerate(zip(ser_names, colors_ab)):
-            p.setBrush(QBrush(QColor(col)))
-            p.setPen(Qt.NoPen)
-            p.drawRect(QRectF(lx, ly + 2, 10, 10))
-            p.setPen(QColor(_INK1))
+        for j, sn in enumerate(ser_names):
             p.setFont(QFont("system-ui", 9))
-            p.drawText(QRectF(lx + 13, ly, leg_item_w - 13, 14), Qt.AlignVCenter, sn)
+            if j < len(bipolar) and bipolar[j] is not None:
+                pos_col, neg_col = bipolar[j]
+                p.setBrush(QBrush(QColor(pos_col)))
+                p.setPen(Qt.NoPen)
+                p.drawRect(QRectF(lx, ly + 2, 6, 10))
+                p.setBrush(QBrush(QColor(neg_col)))
+                p.drawRect(QRectF(lx + 7, ly + 2, 6, 10))
+                p.setPen(QColor(_INK1))
+                p.drawText(QRectF(lx + 16, ly, leg_item_w - 16, 14), Qt.AlignVCenter, sn)
+            else:
+                col = colors_ab[j % len(colors_ab)]
+                p.setBrush(QBrush(QColor(col)))
+                p.setPen(Qt.NoPen)
+                p.drawRect(QRectF(lx, ly + 2, 10, 10))
+                p.setPen(QColor(_INK1))
+                p.drawText(QRectF(lx + 13, ly, leg_item_w - 13, 14), Qt.AlignVCenter, sn)
             lx += leg_item_w
         p.end()
 
@@ -2473,7 +2495,13 @@ class ImageCompareWindow(QMainWindow):
             xlabel="色相帯",
             ylabel="img-B minus img-A (Lab単位)",
             series_names=["ΔL*(明度)", "Δa*(赤+/緑-)", "Δb*(黄+/青-)", "ΔC*(彩度)"],
-            series_colors=["#c3c2b7", "#e34948", "#eda100", "#4a3aa7"])
+            series_colors=["#c3c2b7", "#e34948", "#eda100", "#eb6834"],
+            bipolar_colors=[
+                None,                        # ΔL*: 固定色
+                ("#e34948", "#1baf7a"),       # Δa*: 正=赤, 負=緑
+                ("#eda100", "#2a78d6"),       # Δb*: 正=黄, 負=青
+                None,                        # ΔC*: 固定色 (オレンジ)
+            ])
 
         # 第3ペイン: Lab差分カラーマップ (1px単位)
         # Δa*(赤緑軸): 正=赤寄り → Rチャンネル高, 負=緑寄り → Gチャンネル高
