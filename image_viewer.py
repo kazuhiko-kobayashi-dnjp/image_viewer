@@ -2198,64 +2198,61 @@ class ImageCompareWindow(QMainWindow):
         return np.where(x <= 0.04045, x / 12.92, ((x + 0.055) / 1.055) ** 2.4)
 
     def _run_wb(self):
-        """リニア変換後のR/G/B比率を空間ブロック別に集計してWBズレを推定。
-        グラフ凡例: R比率 / G比率 / B比率 (いずれもBimg÷Aimg のリニア比)
+        """リニア変換後のR/G・B/G比率を空間ブロック別に集計してWBズレを推定。
+        G基準で正規化することで明るさ変化の影響を除去する。
+        グラフ: R/G比 (赤棒) と B/G比 (青棒) — 1.0=差なし
         """
         if self._img_a is None or self._img_b is None:
             return
-        # sRGB→リニア変換
-        lin_a = self._srgb_to_linear(self._img_a)   # shape (H,W,3) float32
+        import cv2
+        lin_a = self._srgb_to_linear(self._img_a)
         lin_b = self._srgb_to_linear(self._aligned_b())
 
-        # 適正露出域マスク (リニアで0.002〜0.9 = sRGB約10〜245相当)
+        # 適正露出域マスク (リニアで0.002〜0.9)
         mask = (lin_a.min(axis=2) > 0.002) & (lin_a.max(axis=2) < 0.9) \
              & (lin_b.min(axis=2) > 0.002) & (lin_b.max(axis=2) < 0.9)
 
-        # チャンネルごとのB/A比率 (リニア空間)
-        ratios_lin = np.zeros_like(lin_a)
-        for ch in range(3):
-            with np.errstate(divide='ignore', invalid='ignore'):
-                ratios_lin[:, :, ch] = np.where(
-                    lin_a[:, :, ch] > 0.002,
-                    lin_b[:, :, ch] / lin_a[:, :, ch], np.nan)
+        # G基準の R/G比・B/G比 を1ピクセル単位で計算
+        # = (linB_R / linA_R) / (linB_G / linA_G) = (linB_R * linA_G) / (linA_R * linB_G)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            rg_ratio = np.where(
+                (lin_a[:, :, 0] > 0.002) & (lin_b[:, :, 1] > 0.002),
+                (lin_b[:, :, 0] * lin_a[:, :, 1]) / (lin_a[:, :, 0] * lin_b[:, :, 1]),
+                np.nan)
+            bg_ratio = np.where(
+                (lin_a[:, :, 2] > 0.002) & (lin_b[:, :, 1] > 0.002),
+                (lin_b[:, :, 2] * lin_a[:, :, 1]) / (lin_a[:, :, 2] * lin_b[:, :, 1]),
+                np.nan)
 
-        r_rat = float(np.nanmedian(ratios_lin[:, :, 0][mask]))
-        g_rat = float(np.nanmedian(ratios_lin[:, :, 1][mask]))
-        b_rat = float(np.nanmedian(ratios_lin[:, :, 2][mask]))
-
-        # G基準で正規化 (G=1.0 に揃えたときのR/B偏り)
-        if g_rat > 0:
-            rg_norm = r_rat / g_rat   # 1.0より大 → Bは赤寄り
-            bg_norm = b_rat / g_rat   # 1.0より大 → Bは青寄り
-        else:
-            rg_norm = bg_norm = 1.0
+        rg_all = float(np.nanmedian(rg_ratio[mask]))
+        bg_all = float(np.nanmedian(bg_ratio[mask]))
 
         # 診断
-        if abs(rg_norm - 1.0) < 0.02 and abs(bg_norm - 1.0) < 0.02:
+        if abs(rg_all - 1.0) < 0.02 and abs(bg_all - 1.0) < 0.02:
             diag = "WBズレなし (±2%以内)"
         else:
             parts = []
-            if rg_norm > 1.02:
-                parts.append(f"img-B が赤寄り (R/G={rg_norm:.3f})")
-            elif rg_norm < 0.98:
-                parts.append(f"img-B が緑/青寄り (R/G={rg_norm:.3f})")
-            if bg_norm > 1.02:
-                parts.append(f"img-B が青寄り (B/G={bg_norm:.3f})")
-            elif bg_norm < 0.98:
-                parts.append(f"img-B が黄/赤寄り (B/G={bg_norm:.3f})")
+            if rg_all > 1.02:
+                parts.append(f"img-B が赤寄り (R/G={rg_all:.3f})")
+            elif rg_all < 0.98:
+                parts.append(f"img-B が緑寄り (R/G={rg_all:.3f})")
+            if bg_all > 1.02:
+                parts.append(f"img-B が青寄り (B/G={bg_all:.3f})")
+            elif bg_all < 0.98:
+                parts.append(f"img-B が黄寄り (B/G={bg_all:.3f})")
             diag = "WBズレあり: " + "  ".join(parts)
 
-        self._lbl_wb.setText(
-            f"{diag}\n"
-            f"リニア比: R={r_rat:.3f}  G={g_rat:.3f}  B={b_rat:.3f}\n"
-            f"G基準: R/G={rg_norm:.3f}  B/G={bg_norm:.3f}")
+        self._lbl_wb.setText(f"{diag}\nR/G={rg_all:.3f}  B/G={bg_all:.3f}")
 
-        # グラフ: 全体 + 4x4ブロック別のR/G/B絶対比率
-        # 凡例は "R比率" / "G比率" / "B比率" (img-B ÷ img-A のリニア値)
+        # グラフ: 全体 + 4×4ブロック別 R/G比・B/G比
+        # X軸ラベル: "全体" + "r0c0"〜"r3c3" (行・列番号)
         h_img, w_img = lin_a.shape[:2]
         grid = 4
         bh, bw = h_img // grid, w_img // grid
-        chart_data = [("全体", r_rat, g_rat, b_rat)]
+        # ブロック順序: 左上→右→次の行 (グラフX軸と第3ペインの位置が対応)
+        chart_data = [("全体", rg_all, bg_all)]
+        blk_rg = np.full((grid, grid), np.nan)   # 第3ペイン用に保存
+        blk_bg = np.full((grid, grid), np.nan)
         for row in range(grid):
             for col in range(grid):
                 y0, y1 = row * bh, (row + 1) * bh
@@ -2263,29 +2260,60 @@ class ImageCompareWindow(QMainWindow):
                 blk_m = mask[y0:y1, x0:x1]
                 if blk_m.sum() < 100:
                     continue
-                rr = float(np.nanmedian(ratios_lin[y0:y1, x0:x1, 0][blk_m]))
-                gr = float(np.nanmedian(ratios_lin[y0:y1, x0:x1, 1][blk_m]))
-                br = float(np.nanmedian(ratios_lin[y0:y1, x0:x1, 2][blk_m]))
-                chart_data.append((f"({row},{col})", rr, gr, br))
+                rg_b = float(np.nanmedian(rg_ratio[y0:y1, x0:x1][blk_m]))
+                bg_b = float(np.nanmedian(bg_ratio[y0:y1, x0:x1][blk_m]))
+                blk_rg[row, col] = rg_b
+                blk_bg[row, col] = bg_b
+                # X軸: 行列番号を直感的に表示 (例: "0,0"=左上)
+                chart_data.append((f"{row},{col}", rg_b, bg_b))
+
         self._wb_chart.set_data(
             chart_data,
-            xlabel="ブロック (全体 + 4×4グリッド)",
-            ylabel="img-B ÷ img-A (リニア比)",
-            series_names=["R比率", "G比率", "B比率"],
-            series_colors=["#e34948", "#1baf7a", "#2a78d6"])  # 赤/緑/青
+            xlabel="ブロック位置 (行,列) ← 第3ペインのグリッドと対応",
+            ylabel="G基準比率 (1.0=差なし)",
+            series_names=["R/G比", "B/G比"],
+            series_colors=["#e34948", "#2a78d6"],  # 赤=R/G, 青=B/G
+            bipolar_colors=[
+                ("#e34948", "#1baf7a"),  # R/G: 正=赤(Rが多い), 負=緑(Gが多い)
+                ("#2a78d6", "#eda100"),  # B/G: 正=青(Bが多い), 負=黄(Gが多い)
+            ])
 
-        # 第3ペイン: R/G/Bチャンネル別差分マップ (1px単位)
-        # 各チャンネルの (B比率 - 1.0) を独立グレーで表示
-        # 差ゼロ=128, B側過剰=白, A側過剰=黒
-        result = np.full((*lin_a.shape[:2], 3), 128, dtype=np.uint8)
-        ch_labels = []
-        for ch, ch_name in enumerate(["R", "G", "B"]):
-            diff_ch = np.where(mask, ratios_lin[:, :, ch] - 1.0, 0.0)
-            result[:, :, ch] = self._diff_to_gray(diff_ch)
+        # 第3ペイン: R/G偏差マップ + グリッド枠 + 番号
+        # R/Gの偏差 (rg_ratio - 1.0) をグレーで表示
+        # 白=imgBが赤寄り, 黒=imgBが緑寄り, 灰=均等
+        rg_dev = np.where(mask, rg_ratio - 1.0, 0.0)
+        gray = self._diff_to_gray(np.where(np.isfinite(rg_dev), rg_dev, 0.0))
+        result = np.stack([gray, gray, gray], axis=2)
         result[~mask] = 64
+
+        # グリッド枠と番号をPainterで描かずにnumpyで直接書き込む
+        # 白線でグリッド境界
+        for i in range(1, grid):
+            gy = i * bh
+            gx = i * bw
+            result[max(0, gy-1):gy+1, :] = [200, 200, 200]
+            result[:, max(0, gx-1):gx+1] = [200, 200, 200]
+
+        # 各ブロック左上隅に R/G比の数値を白文字で書き込む
+        font_scale, thickness = 0.4, 1
+        for row in range(grid):
+            for col in range(grid):
+                if np.isnan(blk_rg[row, col]):
+                    continue
+                tx = col * bw + 4
+                ty = row * bh + 14
+                val_rg = blk_rg[row, col]
+                val_bg = blk_bg[row, col]
+                text = f"R/G{val_rg:.2f}"
+                text2 = f"B/G{val_bg:.2f}"
+                cv2.putText(result, text,  (tx, ty),
+                            cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255,255,255), thickness)
+                cv2.putText(result, text2, (tx, ty + 14),
+                            cv2.FONT_HERSHEY_SIMPLEX, font_scale, (180,220,255), thickness)
+
         self._show_result(result)
         self._statusbar.showMessage(
-            f"{diag}  |  各チャンネル差分: R=赤ch, G=緑ch, B=青ch  白=imgB過剰 黒=imgA過剰 灰=同等")
+            f"{diag}  |  R/Gマップ: 白=imgB赤寄り 黒=imgB緑寄り 灰=均等  グリッド枠=各ブロック")
 
     # ===================================================================
     #  タブ: トーンカーブ
